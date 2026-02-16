@@ -24,7 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
-from html import escape as html_escape
+from io import BytesIO
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -174,14 +174,149 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/tiff", "image/bmp", "image/webp"}
 
 
-def _build_stats_table(rows: list[tuple[str, str]]) -> str:
-    """Build a Unicode box-drawing table from (label, value) pairs."""
-    lw = max(len(r[0]) for r in rows)
-    vw = max(len(r[1]) for r in rows)
-    top = f"\u250c\u2500{'\u2500' * lw}\u2500\u252c\u2500{'\u2500' * vw}\u2500\u2510"
-    bot = f"\u2514\u2500{'\u2500' * lw}\u2500\u2534\u2500{'\u2500' * vw}\u2500\u2518"
-    body = [f"\u2502 {r[0].ljust(lw)} \u2502 {r[1].rjust(vw)} \u2502" for r in rows]
-    return "\n".join([top, *body, bot])
+# ---------------------------------------------------------------------------
+# Gauge renderers — produce compact chart PNGs for inline display
+# ---------------------------------------------------------------------------
+def _render_spread_gauge(df_diams, summary: dict) -> BytesIO:
+    """Render the D10–D50–D90 range bar as a standalone PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    D10 = summary["D10"]
+    D50 = summary["D50"]
+    D90 = summary["D90"]
+    d_min, d_max = df_diams.min(), df_diams.max()
+    q25, q75 = df_diams.quantile(0.25), df_diams.quantile(0.75)
+
+    fig, ax = plt.subplots(figsize=(7, 2.2))
+    fig.subplots_adjust(left=0.08, right=0.95, top=0.82, bottom=0.22)
+    ax.set_title("Particle Size Spread", fontsize=13, fontweight="bold", pad=10)
+
+    # Background (full data range)
+    ax.barh(0, d_max - d_min, left=d_min, height=0.3,
+            color="#e0e0e0", edgecolor="none", zorder=1)
+    # D10-D90 range
+    ax.barh(0, D90 - D10, left=D10, height=0.3,
+            color="#5B9BD5", alpha=0.5, edgecolor="none", zorder=2)
+    # IQR
+    ax.barh(0, q75 - q25, left=q25, height=0.3,
+            color="#2E75B6", alpha=0.6, edgecolor="none", zorder=3)
+
+    mk = dict(zorder=5, clip_on=False)
+    ax.plot(D10, 0, "v", color="#e67e22", markersize=14, **mk)
+    ax.plot(D50, 0, "D", color="#c0392b", markersize=13, **mk)
+    ax.plot(D90, 0, "^", color="#e67e22", markersize=14, **mk)
+
+    ax.text(D10, -0.30, f"D10\n{D10:.3f}", ha="center", va="top",
+            fontsize=9, fontweight="bold", color="#e67e22")
+    ax.text(D50, 0.30, f"D50\n{D50:.3f}", ha="center", va="bottom",
+            fontsize=9, fontweight="bold", color="#c0392b")
+    ax.text(D90, -0.30, f"D90\n{D90:.3f}", ha="center", va="top",
+            fontsize=9, fontweight="bold", color="#e67e22")
+
+    ax.set_xlim(max(0, d_min - 0.05), d_max + 0.05)
+    ax.set_ylim(-0.65, 0.65)
+    ax.set_xlabel("Diameter (mm)", fontsize=10)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.set_yticks([])
+
+    legend_elements = [
+        Line2D([0], [0], marker="v", color="w", markerfacecolor="#e67e22",
+               markersize=8, label="D10 / D90"),
+        Line2D([0], [0], marker="D", color="w", markerfacecolor="#c0392b",
+               markersize=8, label="D50 (Median)"),
+        plt.Rectangle((0, 0), 1, 1, fc="#5B9BD5", alpha=0.5, label="D10\u2013D90 range"),
+        plt.Rectangle((0, 0), 1, 1, fc="#2E75B6", alpha=0.6, label="IQR (25th\u201375th)"),
+    ]
+    ax.legend(handles=legend_elements, fontsize=8, loc="upper right", framealpha=0.9)
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _render_fines_boulders_gauge(summary: dict) -> BytesIO:
+    """Render fines/boulders percentage bars as a standalone PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fines = summary["fines_pct"]
+    boulders = summary["boulders_pct"]
+
+    def _pct_color(pct: float) -> str:
+        if pct < 5:
+            return "#27ae60"
+        elif pct < 15:
+            return "#f39c12"
+        return "#e74c3c"
+
+    fig, ax = plt.subplots(figsize=(5, 2.2))
+    fig.subplots_adjust(left=0.28, right=0.88, top=0.82, bottom=0.15)
+    ax.set_title("Fines & Boulders", fontsize=13, fontweight="bold", pad=10)
+
+    labels = ["Fines\n(<0.2 mm)", "Boulders\n(>1.0 mm)"]
+    values = [fines, boulders]
+    colors = [_pct_color(fines), _pct_color(boulders)]
+
+    # Background track
+    ax.barh([1, 0], [100, 100], height=0.45,
+            color="#f0f0f0", edgecolor="none", zorder=1)
+    bars = ax.barh([1, 0], values, height=0.45,
+                   color=colors, edgecolor="white", zorder=3)
+
+    for bar, val in zip(bars, values):
+        x_pos = max(val + 1, 5)
+        ax.text(x_pos, bar.get_y() + bar.get_height() / 2,
+                f"{val:.1f}%", va="center", ha="left",
+                fontsize=11, fontweight="bold")
+
+    ax.set_xlim(0, max(max(values) * 1.5, 25))
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_xlabel("%", fontsize=10)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def _render_histogram(df_diams, summary: dict) -> BytesIO:
+    """Render the particle size distribution histogram as a standalone PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    median_d = summary.get("median_diameter_mm", df_diams.median())
+    mean_d = summary.get("mean_diameter_mm", df_diams.mean())
+
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    fig.subplots_adjust(left=0.10, right=0.95, top=0.88, bottom=0.15)
+    ax.set_title("Particle Size Distribution", fontsize=13, fontweight="bold", pad=10)
+
+    ax.hist(df_diams, bins=50, edgecolor="black", alpha=0.7, color="#5B9BD5")
+    ax.axvline(median_d, color="red", linestyle="--", linewidth=2,
+               label=f"Median: {median_d:.3f} mm")
+    ax.axvline(mean_d, color="orange", linestyle=":", linewidth=2,
+               label=f"Mean: {mean_d:.3f} mm")
+    ax.legend(fontsize=10, loc="upper right")
+    ax.set_xlabel("Equivalent Diameter (mm)", fontsize=11)
+    ax.set_ylabel("Count", fontsize=11)
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=150, facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 async def _process_and_reply(
@@ -231,42 +366,40 @@ async def _process_and_reply(
 
         save_model_results(prep, result)
 
-        summary_path = prep["img_out_dir"] / "summary.png"
-        if not summary_path.exists():
-            await status.edit_text("❌ Summary image was not generated. Please try again.")
-            return
-
         s = result["summary"]
-        rows = []
+        lines = ["\u2615 *Analysis Complete*\n"]
         if est_rounded is not None:
-            rows.append(("DF54 Setting (est.)", f"~{est_rounded}"))
-        rows.append(("Particles", str(s["n_particles"])))
+            lines.append(f"Estimated DF54 setting: *~{est_rounded}*")
+        lines.append(f"Particles detected: *{s['n_particles']}*")
         if median_d is not None:
-            rows.append(("Median diameter", f"{median_d:.3f} mm"))
+            lines.append(f"Median diameter: *{median_d:.3f} mm*")
         if s.get("D10") is not None:
-            rows.append(("D10", f"{s['D10']:.3f} mm"))
-            rows.append(("D50", f"{s['D50']:.3f} mm"))
-            rows.append(("D90", f"{s['D90']:.3f} mm"))
+            lines.append(f"D10 / D50 / D90: *{s['D10']:.3f}* / *{s['D50']:.3f}* / *{s['D90']:.3f}* mm")
         if s.get("fines_pct") is not None:
-            rows.append(("Fines (\u22640.2 mm)", f"{s['fines_pct']:.1f}%"))
+            lines.append(f"Fines (<0.2 mm): *{s['fines_pct']:.1f}%*")
         if s.get("boulders_pct") is not None:
-            rows.append(("Boulders (\u22651.0 mm)", f"{s['boulders_pct']:.1f}%"))
-
-        table = _build_stats_table(rows)
-        parts = ["\u2615 <b>Analysis Complete</b>\n"]
-        parts.append(f"<pre>{table}</pre>")
+            lines.append(f"Boulders (>1.0 mm): *{s['boulders_pct']:.1f}%*")
         if median_d is not None:
-            parts.append(f"\n\U0001FAD8 {html_escape(get_brew_recommendation(median_d))}")
-        caption = "\n".join(parts)
+            lines.append(f"\n\U0001FAD8 {get_brew_recommendation(median_d)}")
+        caption = "\n".join(lines)
 
         await status.delete()
-        with open(summary_path, "rb") as f:
-            await msg.reply_document(
-                document=f,
-                filename="summary.png",
-                caption=caption,
-                parse_mode="HTML",
-            )
+
+        # --- Send gauge charts as inline photos ---
+        if result.get("df") is not None and not result["df"].empty:
+            df_diams = result["df"]["equiv_diameter_mm"]
+            hist_buf = _render_histogram(df_diams, s)
+            await msg.reply_photo(photo=hist_buf)
+        if s.get("D10") is not None and result.get("df") is not None:
+            df_diams = result["df"]["equiv_diameter_mm"]
+            spread_buf = _render_spread_gauge(df_diams, s)
+            await msg.reply_photo(photo=spread_buf)
+        if s.get("fines_pct") is not None and s.get("boulders_pct") is not None:
+            fb_buf = _render_fines_boulders_gauge(s)
+            await msg.reply_photo(photo=fb_buf)
+
+        # --- Send text summary ---
+        await msg.reply_text(caption, parse_mode="Markdown")
 
         elapsed = time.perf_counter() - t_start
         logger.info(
