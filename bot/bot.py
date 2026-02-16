@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""
+Telegram bot for coffee grind size analysis.
+
+Flow:
+    1. User starts a chat with the bot (/start)
+    2. User sends a photo of coffee grounds on the reference sheet
+    3. Bot runs the analysis pipeline (watershed segmentation)
+    4. Bot returns the summary.png with full pipeline visualisation
+
+Setup:
+    1. Create a bot via @BotFather on Telegram → get your BOT_TOKEN
+    2. Set the token:  export COFFEE_BOT_TOKEN="123456:ABC-DEF..."
+    3. pip install -r requirements.txt
+    4. python bot.py
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Add the src/ directory to sys.path so we can import the pipeline modules
+# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+# Pipeline imports (from src/)
+from analyze import preprocess_image, segment_and_measure, save_model_results
+from constants import estimate_grind_setting
+
+# ---------------------------------------------------------------------------
+# Brew method recommendations (keyed by median diameter range)
+# ---------------------------------------------------------------------------
+
+BREW_RECOMMENDATIONS: list[tuple[float, float, str, list[str]]] = [
+    (0.00, 0.30, "Turkish", [
+        "Ultra-fine! Perfect for a rich, thick Turkish coffee ☕",
+        "This is Turkish-grind territory — time to break out the cezve!",
+        "Ground to dust! Ideal for an authentic Turkish brew.",
+    ]),
+    (0.30, 0.50, "Espresso", [
+        "Dialed in for a punchy espresso shot! ☕",
+        "This grind is screaming espresso — pull that shot!",
+        "Espresso-ready. May the puck prep gods be with you.",
+        "Looking like a solid espresso grind. Bottomless portafilter time!",
+    ]),
+    (0.50, 0.70, "Moka Pot / AeroPress", [
+        "Great for a Moka pot or AeroPress — solid middle ground! 🫖",
+        "Moka pot vibes! This will make a strong, full-bodied cup.",
+        "AeroPress sweet spot — get experimenting with recipes!",
+        "Between espresso and pour-over — perfect for a Moka pot.",
+    ]),
+    (0.70, 0.90, "Pour-over (V60 / Chemex)", [
+        "Looks great for a delicious V60! ☕✨",
+        "Chemex or V60 — this grind is in the sweet spot for pour-over.",
+        "Pour-over perfection. Time to make James Hoffmann proud.",
+        "This is V60 territory — spiral pour, bloom, enjoy! 🌀",
+    ]),
+    (0.90, 1.10, "Drip / Batch Brew", [
+        "Well suited for drip or batch brew — set it and sip it! ☕",
+        "Classic drip-brew grind. Your coffee maker will thank you.",
+        "Batch brew ready — make a pot and share with friends!",
+        "Right in the drip-brew zone. Consistent cups incoming.",
+    ]),
+    (1.10, 1.40, "French Press", [
+        "Coarse enough for a French press — plunge away! 🫖",
+        "French press grind detected! 4 minutes and you're golden.",
+        "This coarseness is begging for a French press. Steep it!",
+        "French press vibes. Bold, full-bodied, no filter needed (well, mesh).",
+    ]),
+    (1.40, 5.00, "Cold Brew / Cupping", [
+        "This coarse? Perfect for cold brew — steep it overnight! 🧊",
+        "Cold brew grind! 12-24 hours in the fridge and you'll have liquid gold.",
+        "Extra coarse — ideal for cold brew or a classic cupping session.",
+        "Beach-day cold brew grind. Get a mason jar and some patience. 🏖️",
+    ]),
+]
+
+
+def get_brew_recommendation(median_diameter_mm: float) -> str:
+    """Return a brew method recommendation based on median particle diameter."""
+    for low, high, method, phrases in BREW_RECOMMENDATIONS:
+        if low <= median_diameter_mm < high:
+            return f"*{method}:* {random.choice(phrases)}"
+    # Fallback for anything outside the ranges
+    if median_diameter_mm < 0:
+        return random.choice(BREW_RECOMMENDATIONS[0][3])
+    return random.choice(BREW_RECOMMENDATIONS[-1][3])
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bot token
+# ---------------------------------------------------------------------------
+BOT_TOKEN = os.environ.get("COFFEE_BOT_TOKEN", "")
+
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start — greet the user."""
+    await update.message.reply_text(
+        "☕ *Coffee Grind Size Analyser*\n\n"
+        "Send me a photo of your coffee grounds on the reference sheet "
+        "and I'll analyse the particle size distribution.\n\n"
+        "Tips:\n"
+        "• Use flash for best results\n"
+        "• Keep all 4 ArUco markers visible\n"
+        "• Spread grounds evenly on the white area",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help."""
+    await update.message.reply_text(
+        "📷 Just send a photo!\n\n"
+        "The photo should show coffee grounds spread on the printed "
+        "reference sheet with all four corner markers visible.\n\n"
+        "I'll detect the markers, correct perspective, segment the "
+        "particles, and send you back a full analysis summary.",
+    )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download photo, run analysis pipeline, send back summary.png."""
+    msg = update.message
+    status = await msg.reply_text("⏳ Analysing your coffee grounds…")
+
+    # Grab the highest-resolution version of the photo
+    photo = msg.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+
+    # Create a temporary working directory
+    tmp_dir = Path(tempfile.mkdtemp(prefix="coffee_bot_"))
+    try:
+        # Download the image
+        img_path = tmp_dir / "photo.jpg"
+        await file.download_to_drive(str(img_path))
+        logger.info("Downloaded photo from %s → %s (%d bytes)",
+                    msg.from_user.username or msg.from_user.id,
+                    img_path, img_path.stat().st_size)
+
+        output_dir = tmp_dir / "results"
+        output_dir.mkdir()
+
+        # --- Run the pipeline (same logic as analyze.py --report) ---
+        prep = preprocess_image(img_path, grind_setting=None, output_dir=output_dir)
+        if prep is None:
+            await status.edit_text(
+                "❌ Could not detect all 4 ArUco markers in your photo.\n\n"
+                "Make sure the reference sheet is fully visible and try again."
+            )
+            return
+
+        result = segment_and_measure(prep, model_name="watershed", expected_diam_mm=0.7)
+        if result is None:
+            await status.edit_text("❌ Segmentation failed. Please try a different photo.")
+            return
+
+        # Estimate grind setting from median diameter
+        median_d = result["summary"]["median_diameter_mm"]
+        if median_d is not None:
+            est = estimate_grind_setting(median_d)
+            est_rounded = round(est)
+        else:
+            est = None
+            est_rounded = None
+
+        prep["grind_setting"] = est_rounded
+        prep["grind_setting_estimated"] = True
+        result["summary"]["grind_setting"] = est_rounded
+        result["summary"]["estimated_grind_setting"] = (
+            round(est, 1) if est is not None else None
+        )
+
+        save_model_results(prep, result)
+
+        # The summary PNG lives at output_dir / <stem> / summary.png
+        summary_path = prep["img_out_dir"] / "summary.png"
+        if not summary_path.exists():
+            await status.edit_text("❌ Summary image was not generated. Please try again.")
+            return
+
+        # Build a short text caption
+        s = result["summary"]
+        lines = ["☕ *Analysis Complete*\n"]
+        if est_rounded is not None:
+            lines.append(f"Estimated DF54 setting: *~{est_rounded}*")
+        lines.append(f"Particles detected: *{s['n_particles']}*")
+        if median_d is not None:
+            lines.append(f"Median diameter: *{median_d:.3f} mm*")
+        if s.get("D10") is not None:
+            lines.append(f"D10 / D50 / D90: {s['D10']:.3f} / {s['D50']:.3f} / {s['D90']:.3f} mm")
+        if s.get("fines_pct") is not None:
+            lines.append(f"Fines (<0.2 mm): {s['fines_pct']:.1f}%")
+        if s.get("boulders_pct") is not None:
+            lines.append(f"Boulders (>1.0 mm): {s['boulders_pct']:.1f}%")
+        if median_d is not None:
+            lines.append(f"\n🫘 {get_brew_recommendation(median_d)}")
+        caption = "\n".join(lines)
+
+        # Send summary.png
+        await status.delete()
+        with open(summary_path, "rb") as f:
+            await msg.reply_document(
+                document=f,
+                filename="summary.png",
+                caption=caption,
+                parse_mode="Markdown",
+            )
+        logger.info("Sent summary to %s", msg.from_user.username or msg.from_user.id)
+
+    except Exception:
+        logger.exception("Error processing photo")
+        await status.edit_text("❌ An unexpected error occurred. Please try again.")
+    finally:
+        # Clean up temp files
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    if not BOT_TOKEN:
+        print(
+            "ERROR: Set your Telegram bot token:\n"
+            "  export COFFEE_BOT_TOKEN=\"123456:ABC-DEF...\"\n"
+            "Get one from @BotFather on Telegram."
+        )
+        sys.exit(1)
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    logger.info("Bot started — polling for updates…")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+# Core analysis pipeline (same as src/requirements.txt)
+opencv-contrib-python>=4.8
+numpy>=2.0
+Pillow>=10.0
+scikit-image>=0.22
+pandas>=2.0
+matplotlib>=3.8
+scipy>=1.14
+
+# Telegram bot
+python-telegram-bot>=21.0
