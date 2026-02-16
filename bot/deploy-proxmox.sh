@@ -23,7 +23,6 @@ set -euo pipefail
 # Configuration — adjust these if needed
 # ---------------------------------------------------------------------------
 BRIDGE="vmbr0"                          # Proxmox network bridge
-STORAGE="local-lvm"                     # Storage for container rootfs
 TEMPLATE_STORAGE="local"                # Storage for ISO/template cache
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 RAM_MB=512
@@ -56,6 +55,33 @@ fi
 # Check we're on a Proxmox host
 if ! command -v pct &>/dev/null; then
     echo "ERROR: 'pct' not found. Run this script on your Proxmox host."
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Auto-detect storage that supports rootdir (for container rootfs)
+# ---------------------------------------------------------------------------
+detect_storage() {
+    # Try common names first, then fall back to first available
+    for candidate in local-lvm local-zfs local; do
+        if pvesm status 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | grep -qw "$candidate"; then
+            echo "$candidate"
+            return
+        fi
+    done
+    # Fall back to first active storage that supports rootdir
+    local store
+    store=$(pvesm status 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | head -1)
+    if [[ -n "$store" ]]; then
+        echo "$store"
+        return
+    fi
+    echo ""
+}
+
+STORAGE=$(detect_storage)
+if [[ -z "$STORAGE" ]]; then
+    echo "ERROR: Could not find any active storage. Check 'pvesm status'."
     exit 1
 fi
 
