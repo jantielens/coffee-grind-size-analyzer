@@ -23,6 +23,7 @@ import random
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -121,11 +122,25 @@ BOT_TOKEN = os.environ.get("COFFEE_BOT_TOKEN", "")
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _user_tag(update: Update) -> str:
+    """Return a readable user identifier for logs."""
+    user = update.effective_user
+    if not user:
+        return "unknown"
+    name = user.username or user.full_name or str(user.id)
+    return f"{name} (id:{user.id})"
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — greet the user."""
+    logger.info("[%s] /start", _user_tag(update))
     await update.message.reply_text(
         "☕ *Coffee Grind Size Analyser*\n\n"
         "Send me a photo of your coffee grounds on the reference sheet "
@@ -140,6 +155,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help."""
+    logger.info("[%s] /help", _user_tag(update))
     await update.message.reply_text(
         "📷 Just send a photo!\n\n"
         "The photo should show coffee grounds spread on the printed "
@@ -152,11 +168,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download photo, run analysis pipeline, send back summary.png."""
     msg = update.message
+    user = _user_tag(update)
     status = await msg.reply_text("⏳ Analysing your coffee grounds…")
+    t_start = time.perf_counter()
 
     # Grab the highest-resolution version of the photo
     photo = msg.photo[-1]
     file = await context.bot.get_file(photo.file_id)
+    file_size_kb = (file.file_size or 0) / 1024
+    logger.info("[%s] uploaded photo (%.1f KB, %dx%d px)",
+                user, file_size_kb, photo.width, photo.height)
 
     # Create a temporary working directory
     tmp_dir = Path(tempfile.mkdtemp(prefix="coffee_bot_"))
@@ -164,9 +185,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Download the image
         img_path = tmp_dir / "photo.jpg"
         await file.download_to_drive(str(img_path))
-        logger.info("Downloaded photo from %s → %s (%d bytes)",
-                    msg.from_user.username or msg.from_user.id,
-                    img_path, img_path.stat().st_size)
 
         output_dir = tmp_dir / "results"
         output_dir.mkdir()
@@ -174,6 +192,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # --- Run the pipeline (same logic as analyze.py --report) ---
         prep = preprocess_image(img_path, grind_setting=None, output_dir=output_dir)
         if prep is None:
+            logger.warning("[%s] marker detection failed", user)
             await status.edit_text(
                 "❌ Could not detect all 4 ArUco markers in your photo.\n\n"
                 "Make sure the reference sheet is fully visible and try again."
@@ -182,6 +201,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         result = segment_and_measure(prep, model_name="watershed", expected_diam_mm=0.7)
         if result is None:
+            logger.warning("[%s] segmentation failed", user)
             await status.edit_text("❌ Segmentation failed. Please try a different photo.")
             return
 
@@ -236,14 +256,40 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 caption=caption,
                 parse_mode="Markdown",
             )
-        logger.info("Sent summary to %s", msg.from_user.username or msg.from_user.id)
+
+        elapsed = time.perf_counter() - t_start
+        logger.info(
+            "[%s] analysis complete in %.1fs — "
+            "particles=%d, median=%.3f mm, est_setting=~%s, "
+            "D10=%.3f, D50=%.3f, D90=%.3f, fines=%.1f%%, boulders=%.1f%%",
+            user, elapsed,
+            s["n_particles"],
+            median_d or 0,
+            est_rounded or "?",
+            s.get("D10", 0) or 0,
+            s.get("D50", 0) or 0,
+            s.get("D90", 0) or 0,
+            s.get("fines_pct", 0) or 0,
+            s.get("boulders_pct", 0) or 0,
+        )
 
     except Exception:
-        logger.exception("Error processing photo")
+        logger.exception("[%s] error processing photo", user)
         await status.edit_text("❌ An unexpected error occurred. Please try again.")
     finally:
         # Clean up temp files
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plain text messages — log and reply with a hint."""
+    text = update.message.text or ""
+    logger.info("[%s] messaged: \"%s\"", _user_tag(update), text[:200])
+    await update.message.reply_text(
+        "📷 Send me a photo of your coffee grounds on the reference sheet "
+        "and I'll analyse it!\n\n"
+        "Type /help for more info.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +310,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started — polling for updates…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
