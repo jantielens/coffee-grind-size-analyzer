@@ -64,7 +64,9 @@ fi
 # ---------------------------------------------------------------------------
 find_free_ctid() {
     local ctid=100
-    while pct config "$ctid" &>/dev/null; do
+    local used
+    used=$(pct list 2>/dev/null | awk 'NR>1 {print $1}')
+    while echo "$used" | grep -qw "$ctid"; do
         ctid=$((ctid + 1))
     done
     echo "$ctid"
