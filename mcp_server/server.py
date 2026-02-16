@@ -25,19 +25,32 @@ from __future__ import annotations
 import asyncio
 import base64
 import random
+import contextlib
+import io
+import os
+import random
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Force UTF-8 for stdout/stderr — Windows defaults to the ANSI codepage
-# which cannot encode the Unicode symbols used in analyze.py's print output.
+# MCP uses stdout for JSON-RPC — redirect pipeline print output to stderr
+# so it doesn't corrupt the protocol stream.
 # ---------------------------------------------------------------------------
-if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+@contextlib.contextmanager
+def _redirect_prints():
+    """Redirect stdout to stderr during pipeline execution."""
+    old_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = old_stdout
 
 from mcp.server.fastmcp import FastMCP
 
@@ -141,16 +154,17 @@ def _run_pipeline(image_path: Path, cleanup_dir: Path | None = None) -> dict:
         output_dir = tmp_dir / "results"
         output_dir.mkdir(exist_ok=True)
 
-        prep = preprocess_image(image_path, grind_setting=None, output_dir=output_dir)
-        if prep is None:
-            raise ValueError(
-                "Could not detect all 4 ArUco markers. "
-                "Make sure the reference sheet is fully visible in the photo."
-            )
+        with _redirect_prints():
+            prep = preprocess_image(image_path, grind_setting=None, output_dir=output_dir)
+            if prep is None:
+                raise ValueError(
+                    "Could not detect all 4 ArUco markers. "
+                    "Make sure the reference sheet is fully visible in the photo."
+                )
 
-        result = segment_and_measure(prep, model_name="watershed", expected_diam_mm=0.7)
-        if result is None:
-            raise ValueError("Segmentation failed. Try a different photo.")
+            result = segment_and_measure(prep, model_name="watershed", expected_diam_mm=0.7)
+            if result is None:
+                raise ValueError("Segmentation failed. Try a different photo.")
 
         s = result["summary"]
         median_d = s["median_diameter_mm"]
