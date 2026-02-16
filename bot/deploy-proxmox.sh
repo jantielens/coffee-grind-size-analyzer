@@ -64,7 +64,7 @@ fi
 # ---------------------------------------------------------------------------
 find_free_ctid() {
     local ctid=100
-    while pct status "$ctid" &>/dev/null; do
+    while pct config "$ctid" &>/dev/null; do
         ctid=$((ctid + 1))
     done
     echo "$ctid"
