@@ -118,20 +118,21 @@ def _get_brew_recommendation(median_diameter_mm: float) -> dict:
 # Tools
 # ---------------------------------------------------------------------------
 
-def _run_pipeline(image_bytes: bytes) -> dict:
+def _run_pipeline(image_path: Path, cleanup_dir: Path | None = None) -> dict:
     """Run the full analysis pipeline synchronously.
+
+    Args:
+        image_path: Path to the image file on disk.
+        cleanup_dir: If set, this temp directory will be removed when done.
 
     Returns a dict with all statistics, or raises on failure.
     """
-    tmp_dir = Path(tempfile.mkdtemp(prefix="coffee_mcp_"))
+    tmp_dir = cleanup_dir or Path(tempfile.mkdtemp(prefix="coffee_mcp_"))
     try:
-        img_path = tmp_dir / "photo.jpg"
-        img_path.write_bytes(image_bytes)
-
         output_dir = tmp_dir / "results"
-        output_dir.mkdir()
+        output_dir.mkdir(exist_ok=True)
 
-        prep = preprocess_image(img_path, grind_setting=None, output_dir=output_dir)
+        prep = preprocess_image(image_path, grind_setting=None, output_dir=output_dir)
         if prep is None:
             raise ValueError(
                 "Could not detect all 4 ArUco markers. "
@@ -180,31 +181,51 @@ def _run_pipeline(image_bytes: bytes) -> dict:
         return response
 
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if cleanup_dir is not None:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 @mcp.tool()
-async def analyze_grind_photo(image_base64: str) -> dict:
+async def analyze_grind_photo(
+    image_path: str | None = None,
+    image_base64: str | None = None,
+) -> dict:
     """Analyse a coffee grind photo and return particle size statistics.
 
     The photo must show coffee grounds spread on the printed ArUco reference
     sheet with all four corner markers fully visible.
 
+    Provide exactly one of the two arguments.
+
     Args:
+        image_path: Absolute path to an image file on disk (preferred).
         image_base64: The photo as a base64-encoded string (JPEG or PNG).
+                      Use this only when you don't have a file on disk.
 
     Returns:
         A dict with particle count, size distribution (median, mean, D10/D50/D90,
         fines/boulders percentages, span), estimated DF54 grind setting, and a
         brew method recommendation.
     """
-    try:
-        image_bytes = base64.b64decode(image_base64)
-    except Exception:
-        raise ValueError("Invalid base64 image data.")
-
-    # Run the CPU-bound pipeline in a thread to avoid blocking the event loop
-    return await asyncio.to_thread(_run_pipeline, image_bytes)
+    if image_path:
+        p = Path(image_path)
+        if not p.is_file():
+            raise ValueError(f"File not found: {image_path}")
+        return await asyncio.to_thread(_run_pipeline, p)
+    elif image_base64:
+        try:
+            image_bytes = base64.b64decode(image_base64)
+        except Exception:
+            raise ValueError("Invalid base64 image data.")
+        tmp_dir = Path(tempfile.mkdtemp(prefix="coffee_mcp_"))
+        tmp_path = tmp_dir / "photo.jpg"
+        tmp_path.write_bytes(image_bytes)
+        return await asyncio.to_thread(_run_pipeline, tmp_path, tmp_dir)
+    else:
+        raise ValueError(
+            "Provide either image_path (path to a file on disk) "
+            "or image_base64 (base64-encoded image data)."
+        )
 
 
 @mcp.tool()
