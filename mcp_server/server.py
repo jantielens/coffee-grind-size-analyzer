@@ -24,9 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import random
+import builtins
 import contextlib
-import io
 import os
 import random
 import shutil
@@ -35,22 +34,27 @@ import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# MCP uses stdout for JSON-RPC — redirect pipeline print output to stderr
-# so it doesn't corrupt the protocol stream.
+# MCP uses stdout for JSON-RPC — we must NOT touch sys.stdout.
+# Instead, patch builtins.print to route pipeline output to stderr.
 # ---------------------------------------------------------------------------
 if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+_original_print = builtins.print
+
 
 @contextlib.contextmanager
-def _redirect_prints():
-    """Redirect stdout to stderr during pipeline execution."""
-    old_stdout = sys.stdout
-    sys.stdout = sys.stderr
+def _suppress_prints():
+    """Route all print() calls to stderr without touching sys.stdout."""
+    def _stderr_print(*args, **kwargs):
+        kwargs["file"] = sys.stderr
+        _original_print(*args, **kwargs)
+
+    builtins.print = _stderr_print
     try:
         yield
     finally:
-        sys.stdout = old_stdout
+        builtins.print = _original_print
 
 from mcp.server.fastmcp import FastMCP
 
@@ -154,7 +158,7 @@ def _run_pipeline(image_path: Path, cleanup_dir: Path | None = None) -> dict:
         output_dir = tmp_dir / "results"
         output_dir.mkdir(exist_ok=True)
 
-        with _redirect_prints():
+        with _suppress_prints():
             prep = preprocess_image(image_path, grind_setting=None, output_dir=output_dir)
             if prep is None:
                 raise ValueError(
