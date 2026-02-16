@@ -1,0 +1,46 @@
+{
+  "marker_dictionary": "DICT_4X4_50",
+  "marker_ids": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "marker_size_mm": 15,
+  "marker_centers_mm": {
+    "0": {
+      "x": 17.5,
+      "y": 22.5
+    },
+    "1": {
+      "x": 72.5,
+      "y": 22.5
+    },
+    "2": {
+      "x": 17.5,
+      "y": 102.5
+    },
+    "3": {
+      "x": 72.5,
+      "y": 102.5
+    }
+  },
+  "marker_rect_mm": {
+    "w": 55,
+    "h": 80
+  },
+  "grounds_zone_mm": {
+    "w": 70,
+    "h": 95
+  },
+  "grounds_zone_center_mm": {
+    "x": 45.0,
+    "y": 62.5
+  },
+  "note_box_mm": {
+    "x": 57.5,
+    "y": 102.5,
+    "w": 15,
+    "h": 15
+  }
+}

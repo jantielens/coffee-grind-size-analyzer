@@ -1,0 +1,5 @@
+image,grind_setting,model,n_particles,median_diameter_mm,mean_diameter_mm,std_diameter_mm,q25_diameter_mm,q75_diameter_mm,total_area_mm2,D10,D50,D90,span,fines_pct,boulders_pct,D_4_3,D_3_2
+setting20.jpg,20,watershed,394,0.5078,0.5439,0.2253,0.3742,0.6747,107.225,0.2985,0.5078,0.8551,1.096,1.8,4.3,0.8151,0.729
+setting40.jpg,40,watershed,177,0.7024,0.7389,0.269,0.5557,0.8938,85.905,0.4245,0.7024,1.1292,1.003,1.1,17.5,1.0113,0.9274
+setting60.jpg,60,watershed,191,0.9491,1.0047,0.3961,0.7236,1.2678,174.83,0.5614,0.9491,1.5244,1.015,1.0,44.5,1.4315,1.301
+setting80.jpg,80,watershed,111,0.8482,0.9051,0.3684,0.658,1.1149,83.135,0.5078,0.8482,1.4538,1.115,2.7,34.2,1.3065,1.1866
