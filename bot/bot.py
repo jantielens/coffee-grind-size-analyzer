@@ -151,8 +151,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Keep all 4 ArUco markers fully visible\n"
         "• Less is more — spread a *tiny* amount of grounds so particles "
         "don't touch each other 🫘\n"
-        "• Upload photos in *HD quality* \\(Telegram compresses by default — "
-        "tap the quality toggle before sending\\!\\)",
+        "• Send your photo as a *file* \\(📎\\) instead of as a photo — "
+        "Telegram compresses photos and you lose detail\!",
         parse_mode="MarkdownV2",
         disable_web_page_preview=True,
     )
@@ -275,7 +275,7 @@ async def _process_and_reply(
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle compressed photo uploads."""
+    """Handle compressed photo uploads — analyse but suggest sending as file."""
     msg = update.message
     user = _user_tag(update)
 
@@ -284,6 +284,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     file_size_kb = (file.file_size or 0) / 1024
     logger.info("[%s] uploaded photo (%.1f KB, %dx%d px)",
                 user, file_size_kb, photo.width, photo.height)
+
+    await msg.reply_text(
+        "💡 *Tip:* Telegram compresses photos and reduces detail, which can "
+        "affect the analysis\. For better results, send your image as a "
+        "*file* instead \\(tap 📎 → File → pick your photo\\)\."
+        "\n\nI'll do my best with this one anyway\! ☕",
+        parse_mode="MarkdownV2",
+    )
 
     await _process_and_reply(msg, user, file,
                              f"photo {photo.width}x{photo.height} {file_size_kb:.0f}KB")
