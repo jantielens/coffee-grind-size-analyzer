@@ -24,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
+from html import escape as html_escape
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/tiff", "image/bmp", "image/webp"}
 
 
+def _build_stats_table(rows: list[tuple[str, str]]) -> str:
+    """Build a Unicode box-drawing table from (label, value) pairs."""
+    lw = max(len(r[0]) for r in rows)
+    vw = max(len(r[1]) for r in rows)
+    top = f"\u250c\u2500{'\u2500' * lw}\u2500\u252c\u2500{'\u2500' * vw}\u2500\u2510"
+    bot = f"\u2514\u2500{'\u2500' * lw}\u2500\u2534\u2500{'\u2500' * vw}\u2500\u2518"
+    body = [f"\u2502 {r[0].ljust(lw)} \u2502 {r[1].rjust(vw)} \u2502" for r in rows]
+    return "\n".join([top, *body, bot])
+
+
 async def _process_and_reply(
     msg, user: str, file, file_desc: str,
 ) -> None:
@@ -226,21 +237,27 @@ async def _process_and_reply(
             return
 
         s = result["summary"]
-        lines = ["☕ *Analysis Complete*\n"]
+        rows = []
         if est_rounded is not None:
-            lines.append(f"Estimated DF54 setting: *~{est_rounded}*")
-        lines.append(f"Particles detected: *{s['n_particles']}*")
+            rows.append(("DF54 Setting (est.)", f"~{est_rounded}"))
+        rows.append(("Particles", str(s["n_particles"])))
         if median_d is not None:
-            lines.append(f"Median diameter: *{median_d:.3f} mm*")
+            rows.append(("Median diameter", f"{median_d:.3f} mm"))
         if s.get("D10") is not None:
-            lines.append(f"D10 / D50 / D90: {s['D10']:.3f} / {s['D50']:.3f} / {s['D90']:.3f} mm")
+            rows.append(("D10", f"{s['D10']:.3f} mm"))
+            rows.append(("D50", f"{s['D50']:.3f} mm"))
+            rows.append(("D90", f"{s['D90']:.3f} mm"))
         if s.get("fines_pct") is not None:
-            lines.append(f"Fines (<0.2 mm): {s['fines_pct']:.1f}%")
+            rows.append(("Fines (\u22640.2 mm)", f"{s['fines_pct']:.1f}%"))
         if s.get("boulders_pct") is not None:
-            lines.append(f"Boulders (>1.0 mm): {s['boulders_pct']:.1f}%")
+            rows.append(("Boulders (\u22651.0 mm)", f"{s['boulders_pct']:.1f}%"))
+
+        table = _build_stats_table(rows)
+        parts = ["\u2615 <b>Analysis Complete</b>\n"]
+        parts.append(f"<pre>{table}</pre>")
         if median_d is not None:
-            lines.append(f"\n🫘 {get_brew_recommendation(median_d)}")
-        caption = "\n".join(lines)
+            parts.append(f"\n\U0001FAD8 {html_escape(get_brew_recommendation(median_d))}")
+        caption = "\n".join(parts)
 
         await status.delete()
         with open(summary_path, "rb") as f:
@@ -248,7 +265,7 @@ async def _process_and_reply(
                 document=f,
                 filename="summary.png",
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
         elapsed = time.perf_counter() - t_start
