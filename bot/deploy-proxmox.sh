@@ -25,8 +25,8 @@ set -euo pipefail
 BRIDGE="vmbr0"                          # Proxmox network bridge
 TEMPLATE_STORAGE="local"                # Storage for ISO/template cache
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
-RAM_MB=512
-SWAP_MB=256
+RAM_MB=1024
+SWAP_MB=512
 DISK_GB=4
 CORES=2
 HOSTNAME="coffee-bot"
