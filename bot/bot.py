@@ -143,13 +143,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("[%s] /start", _user_tag(update))
     await update.message.reply_text(
         "☕ *Coffee Grind Size Analyser*\n\n"
-        "Send me a photo of your coffee grounds on the reference sheet "
-        "and I'll analyse the particle size distribution.\n\n"
-        "Tips:\n"
-        "• Use flash for best results\n"
-        "• Keep all 4 ArUco markers visible\n"
-        "• Spread grounds evenly on the white area",
-        parse_mode="Markdown",
+        "Send me a photo of your coffee grounds on the "
+        "[reference sheet](https://github.com/jantielens/coffee-grind-size-analyzer/blob/main/reference-sheet.pdf) "
+        "and I'll analyse the particle size distribution\\!\n\n"
+        "📋 *Tips for great results:*\n"
+        "• Use your phone's *flash* for consistent lighting\n"
+        "• Keep all 4 ArUco markers fully visible\n"
+        "• Less is more — spread a *tiny* amount of grounds so particles "
+        "don't touch each other 🫘\n"
+        "• Upload photos in *HD quality* \\(Telegram compresses by default — "
+        "tap the quality toggle before sending\\!\\)",
+        parse_mode="MarkdownV2",
+        disable_web_page_preview=True,
     )
 
 
