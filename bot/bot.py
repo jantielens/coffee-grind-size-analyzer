@@ -170,31 +170,24 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Download photo, run analysis pipeline, send back summary.png."""
-    msg = update.message
-    user = _user_tag(update)
+IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/tiff", "image/bmp", "image/webp"}
+
+
+async def _process_and_reply(
+    msg, user: str, file, file_desc: str,
+) -> None:
+    """Shared analysis pipeline: download → analyse → reply with summary.png."""
     status = await msg.reply_text("⏳ Analysing your coffee grounds…")
     t_start = time.perf_counter()
 
-    # Grab the highest-resolution version of the photo
-    photo = msg.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    file_size_kb = (file.file_size or 0) / 1024
-    logger.info("[%s] uploaded photo (%.1f KB, %dx%d px)",
-                user, file_size_kb, photo.width, photo.height)
-
-    # Create a temporary working directory
     tmp_dir = Path(tempfile.mkdtemp(prefix="coffee_bot_"))
     try:
-        # Download the image
         img_path = tmp_dir / "photo.jpg"
         await file.download_to_drive(str(img_path))
 
         output_dir = tmp_dir / "results"
         output_dir.mkdir()
 
-        # --- Run the pipeline (same logic as analyze.py --report) ---
         prep = preprocess_image(img_path, grind_setting=None, output_dir=output_dir)
         if prep is None:
             logger.warning("[%s] marker detection failed", user)
@@ -210,7 +203,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await status.edit_text("❌ Segmentation failed. Please try a different photo.")
             return
 
-        # Estimate grind setting from median diameter
         median_d = result["summary"]["median_diameter_mm"]
         if median_d is not None:
             est = estimate_grind_setting(median_d)
@@ -228,13 +220,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         save_model_results(prep, result)
 
-        # The summary PNG lives at output_dir / <stem> / summary.png
         summary_path = prep["img_out_dir"] / "summary.png"
         if not summary_path.exists():
             await status.edit_text("❌ Summary image was not generated. Please try again.")
             return
 
-        # Build a short text caption
         s = result["summary"]
         lines = ["☕ *Analysis Complete*\n"]
         if est_rounded is not None:
@@ -252,7 +242,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             lines.append(f"\n🫘 {get_brew_recommendation(median_d)}")
         caption = "\n".join(lines)
 
-        # Send summary.png
         await status.delete()
         with open(summary_path, "rb") as f:
             await msg.reply_document(
@@ -264,10 +253,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         elapsed = time.perf_counter() - t_start
         logger.info(
-            "[%s] analysis complete in %.1fs — "
+            "[%s] analysis complete in %.1fs (%s) — "
             "particles=%d, median=%.3f mm, est_setting=~%s, "
             "D10=%.3f, D50=%.3f, D90=%.3f, fines=%.1f%%, boulders=%.1f%%",
-            user, elapsed,
+            user, elapsed, file_desc,
             s["n_particles"],
             median_d or 0,
             est_rounded or "?",
@@ -282,8 +271,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.exception("[%s] error processing photo", user)
         await status.edit_text("❌ An unexpected error occurred. Please try again.")
     finally:
-        # Clean up temp files
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle compressed photo uploads."""
+    msg = update.message
+    user = _user_tag(update)
+
+    photo = msg.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    file_size_kb = (file.file_size or 0) / 1024
+    logger.info("[%s] uploaded photo (%.1f KB, %dx%d px)",
+                user, file_size_kb, photo.width, photo.height)
+
+    await _process_and_reply(msg, user, file,
+                             f"photo {photo.width}x{photo.height} {file_size_kb:.0f}KB")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle images sent as files (uncompressed)."""
+    msg = update.message
+    user = _user_tag(update)
+    doc = msg.document
+
+    mime = doc.mime_type or ""
+    if mime not in IMAGE_MIME_TYPES:
+        logger.info("[%s] sent non-image document: %s (%s)", user, doc.file_name, mime)
+        await msg.reply_text(
+            "📷 That doesn't look like an image file. "
+            "Send a photo (JPG, PNG) of your coffee grounds on the reference sheet!",
+        )
+        return
+
+    file = await context.bot.get_file(doc.file_id)
+    file_size_kb = (file.file_size or 0) / 1024
+    logger.info("[%s] uploaded file: %s (%.1f KB, %s)",
+                user, doc.file_name, file_size_kb, mime)
+
+    await _process_and_reply(msg, user, file,
+                             f"file {doc.file_name} {file_size_kb:.0f}KB")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -315,6 +342,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started — polling for updates…")
