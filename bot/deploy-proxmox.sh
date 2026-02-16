@@ -65,7 +65,8 @@ fi
 find_free_ctid() {
     local ctid=100
     local used
-    used=$(pct list 2>/dev/null | awk 'NR>1 {print $1}')
+    # Collect IDs from both LXC containers (pct) and VMs (qm)
+    used=$( { pct list 2>/dev/null; qm list 2>/dev/null; } | awk 'NR>1 {print $1}' | sort -un )
     while echo "$used" | grep -qw "$ctid"; do
         ctid=$((ctid + 1))
     done
