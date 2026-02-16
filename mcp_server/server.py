@@ -30,6 +30,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Force UTF-8 for stdout/stderr — Windows defaults to the ANSI codepage
+# which cannot encode the Unicode symbols used in analyze.py's print output.
+# ---------------------------------------------------------------------------
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from mcp.server.fastmcp import FastMCP
 
 # ---------------------------------------------------------------------------
